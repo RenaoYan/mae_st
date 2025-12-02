@@ -291,7 +291,7 @@ class Kinetics(torch.utils.data.Dataset):
             label_list = []
             label = self._labels[index]
             if self.rand_aug:
-                for i in range(self._repeat_aug):
+                for _ in range(self._repeat_aug):
                     clip_sz = sampling_rate * self._num_frames / self._target_fps * fps
                     start_idx, end_idx = get_start_end_idx(
                         frames.shape[0],
@@ -315,7 +315,7 @@ class Kinetics(torch.utils.data.Dataset):
                     label_list.append(label)
             else:
                 # T H W C -> C T H W.
-                for i in range(self._repeat_aug):
+                for _ in range(self._repeat_aug):
                     clip_sz = sampling_rate * self._num_frames / self._target_fps * fps
                     start_idx, end_idx = get_start_end_idx(
                         frames.shape[0],
