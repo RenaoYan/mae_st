@@ -7,7 +7,6 @@ import random
 
 import torch
 import torch.utils.data
-
 from iopath.common.file_io import g_pathmgr as pathmgr
 from mae_st.util.decoder.decoder import get_start_end_idx, temporal_sampling
 from torchvision import transforms
@@ -178,10 +177,10 @@ class Kinetics(torch.utils.data.Dataset):
                     self._labels.append(int(label))
                     self._spatial_temporal_idx.append(idx)
                     self._video_meta[clip_idx * self._num_clips + idx] = {}
-        assert (
-            len(self._path_to_videos) > 0
-        ), "Failed to load Kinetics split {} from {}".format(
-            self._split_idx, path_to_file
+        assert len(self._path_to_videos) > 0, (
+            "Failed to load Kinetics split {} from {}".format(
+                self._split_idx, path_to_file
+            )
         )
         print(
             "Constructing kinetics dataloader (size: {}) from {}".format(

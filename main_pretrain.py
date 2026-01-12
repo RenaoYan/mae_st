@@ -15,9 +15,7 @@ import os
 import time
 
 import mae_st.util.env
-
 import mae_st.util.misc as misc
-
 import numpy as np
 import timm
 import torch

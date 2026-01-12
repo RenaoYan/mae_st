@@ -14,7 +14,6 @@ import os
 
 import mae_st.models_vit as models_vit
 import mae_st.util.misc as misc
-
 import numpy as np
 import timm
 import torch
