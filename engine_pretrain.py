@@ -44,7 +44,7 @@ def train_one_epoch(
         "mask_ratio", misc.SmoothedValue(window_size=1, fmt="{value:.6f}")
     )
     header = "Epoch: [{}]".format(epoch)
-    print_freq = 20
+    print_freq = args.print_freq
 
     accum_iter = args.accum_iter
 
@@ -54,7 +54,12 @@ def train_one_epoch(
         print("log_dir: {}".format(log_writer.log_dir))
 
     for data_iter_step, (samples, _) in enumerate(
-        metric_logger.log_every(data_loader, print_freq, header)
+        metric_logger.log_every(
+            data_loader,
+            print_freq,
+            header,
+            batch_size=args.batch_size * misc.get_world_size(),
+        )
     ):
         # we use a per iteration (instead of per epoch) lr scheduler
         if data_iter_step % accum_iter == 0:

@@ -144,6 +144,7 @@ class Block(nn.Module):
         act_layer=nn.GELU,
         norm_layer=nn.LayerNorm,
         attn_func=Attention,
+        mlp_layer=Mlp,
     ):
         super().__init__()
         self.norm1 = norm_layer(dim)
@@ -159,7 +160,7 @@ class Block(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(
+        self.mlp = mlp_layer(
             in_features=dim,
             hidden_features=mlp_hidden_dim,
             act_layer=act_layer,

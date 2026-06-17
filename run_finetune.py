@@ -2,8 +2,10 @@
 # All rights reserved.
 
 
+import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from main_finetune import get_args_parser, main
 
 

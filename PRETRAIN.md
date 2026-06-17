@@ -26,5 +26,5 @@ python run_pretrain.py \
 ```
 
 blr is the base learning rate. The actual lr is computed by the linear scaling rule: lr = blr * effective batch size / 256.
-Here we use --norm_pix_loss as the target for better representation learning. To train a baseline model (e.g., for visualization), use pixel-based constructiomae_vit_large_patch16n and turn off --norm_pix_loss.
-To train ViT-Base or ViT-Huge, set --model mae_vit_base_patch16 or --model mae_vit_huge_patch14.
+Here we use --norm_pix_loss as the target for better representation learning. To train a baseline model (e.g., for visualization), use pixel-based reconstruction and turn off --norm_pix_loss.
+Available original MAE-ST 3D model sizes are ViT-B/L/H: --model mae_vit_base_patch16, mae_vit_large_patch16, or mae_vit_huge_patch14.

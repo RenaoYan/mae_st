@@ -12,7 +12,10 @@ import logging
 import os
 import sys
 
-import simplejson
+try:
+    import simplejson
+except ImportError:
+    import json as simplejson
 import torch
 import torch.distributed as dist
 from iopath.common.file_io import g_pathmgr as pathmgr
@@ -105,7 +108,16 @@ def log_json_stats(stats):
         k: decimal.Decimal("{:.5f}".format(v)) if isinstance(v, float) else v
         for k, v in stats.items()
     }
-    json_stats = simplejson.dumps(stats, sort_keys=True, use_decimal=True)
+    try:
+        json_stats = simplejson.dumps(stats, sort_keys=True, use_decimal=True)
+    except TypeError:
+        json_stats = simplejson.dumps(
+            {
+                k: float(v) if isinstance(v, decimal.Decimal) else v
+                for k, v in stats.items()
+            },
+            sort_keys=True,
+        )
     logger = get_logger(__name__)
     print("json_stats: {:s}".format(json_stats))
 

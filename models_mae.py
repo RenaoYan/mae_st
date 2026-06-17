@@ -12,6 +12,8 @@
 
 from functools import partial
 
+import timm
+
 import torch
 import torch.nn as nn
 from mae_st.util import video_vit
@@ -43,6 +45,7 @@ class MaskedAutoencoderViT(nn.Module):
         trunc_init=False,
         cls_embed=False,
         pred_t_dim=8,
+        mlp_layer=video_vit.Mlp,
         **kwargs,
     ):
         super().__init__()
@@ -96,6 +99,7 @@ class MaskedAutoencoderViT(nn.Module):
                     qkv_bias=not no_qkv_bias,
                     qk_scale=None,
                     norm_layer=norm_layer,
+                    mlp_layer=mlp_layer,
                 )
                 for i in range(depth)
             ]
@@ -464,10 +468,11 @@ def mae_vit_large_patch16(**kwargs):
 def mae_vit_huge_patch14(**kwargs):
     model = MaskedAutoencoderViT(
         patch_size=14,
-        embed_dim=1280,
-        depth=32,
-        num_heads=16,
-        mlp_ratio=4,
+        embed_dim=1536,
+        depth=40,
+        num_heads=24,
+        mlp_ratio=2.66667 * 2,
+        mlp_layer=timm.layers.SwiGLUPacked,
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
         **kwargs,
     )

@@ -20,7 +20,10 @@ import mae_st.util.logging as logging
 import psutil
 import torch
 import torch.distributed as dist
-import torch.fb.rendezvous.zeus
+try:
+    import torch.fb.rendezvous.zeus
+except ImportError:
+    pass
 from iopath.common.file_io import g_pathmgr as pathmgr
 from mae_st.util.logging import master_print as print
 from torch import inf
@@ -128,7 +131,7 @@ class MetricLogger:
     def add_meter(self, name, meter):
         self.meters[name] = meter
 
-    def log_every(self, iterable, print_freq, header=None):
+    def log_every(self, iterable, print_freq, header=None, batch_size=None):
         i = 0
         if not header:
             header = ""
@@ -144,9 +147,13 @@ class MetricLogger:
             "{meters}",
             "time: {time}",
             "data: {data}",
+            "compute: {compute:.4f}",
+            "data_pct: {data_pct:.1f}%",
         ]
+        if batch_size is not None:
+            log_msg.append("samples/s: {samples_per_sec:.2f}")
         if torch.cuda.is_available():
-            log_msg.append("max mem: {memory:.0f}")
+            log_msg.extend(["max mem: {memory:.0f}", "gpu_util: {gpu_util}", "gpu_mem_util: {gpu_mem_util}"])
         log_msg = self.delimiter.join(log_msg)
         MB = 1024.0 * 1024.0
         for obj in iterable:
@@ -156,7 +163,19 @@ class MetricLogger:
             if i % print_freq == 0 or i == len(iterable) - 1:
                 eta_seconds = iter_time.global_avg * (len(iterable) - i)
                 eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
+                iter_avg = max(iter_time.avg, 1e-12)
+                data_avg = data_time.avg
+                compute_avg = max(iter_avg - data_avg, 0.0)
+                data_pct = 100.0 * data_avg / iter_avg
+                samples_per_sec = 0.0 if batch_size is None else batch_size / iter_avg
+                gpu_util = "n/a"
+                gpu_mem_util = "n/a"
                 if torch.cuda.is_available():
+                    try:
+                        gpu_util = "{:.0f}%".format(torch.cuda.utilization())
+                        gpu_mem_util = "{:.0f}%".format(torch.cuda.memory_usage())
+                    except Exception:
+                        pass
                     print(
                         log_msg.format(
                             i,
@@ -165,7 +184,12 @@ class MetricLogger:
                             meters=str(self),
                             time=str(iter_time),
                             data=str(data_time),
+                            compute=compute_avg,
+                            data_pct=data_pct,
+                            samples_per_sec=samples_per_sec,
                             memory=torch.cuda.max_memory_allocated() / MB,
+                            gpu_util=gpu_util,
+                            gpu_mem_util=gpu_mem_util,
                         )
                     )
 
@@ -178,6 +202,9 @@ class MetricLogger:
                             meters=str(self),
                             time=str(iter_time),
                             data=str(data_time),
+                            compute=compute_avg,
+                            data_pct=data_pct,
+                            samples_per_sec=samples_per_sec,
                         )
                     )
             i += 1

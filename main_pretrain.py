@@ -24,7 +24,18 @@ from iopath.common.file_io import g_pathmgr as pathmgr
 from mae_st import models_mae
 from mae_st.engine_pretrain import train_one_epoch
 from mae_st.util.kinetics import Kinetics
+from mae_st.util.prostate import (
+    PROSTATE_CACHE_SUFFIXES,
+    PROSTATE_COHORTS,
+    ProstatePatchDataset,
+    infer_chunk_size,
+    resolve_loco_cohorts,
+)
 from mae_st.util.misc import NativeScalerWithGradNormCount as NativeScaler
+from mae_st.util.pretrained_2d import (
+    DEFAULT_2D_CKPT_DIR,
+    load_2d_pretrained_weights,
+)
 from tensorboard.compat.tensorflow_stub.io.gfile import register_filesystem
 from torch.utils.tensorboard import SummaryWriter
 
@@ -126,6 +137,12 @@ def get_args_parser():
     )
     parser.add_argument("--num_workers", default=10, type=int)
     parser.add_argument(
+        "--print_freq",
+        default=20,
+        type=int,
+        help="How often to print training throughput and bottleneck diagnostics.",
+    )
+    parser.add_argument(
         "--pin_mem",
         action="store_true",
         help="Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.",
@@ -149,6 +166,16 @@ def get_args_parser():
     parser.add_argument("--decoder_embed_dim", default=512, type=int)
     parser.add_argument("--decoder_depth", default=8, type=int)
     parser.add_argument("--decoder_num_heads", default=16, type=int)
+    parser.add_argument(
+        "--decoder_arch",
+        default="custom",
+        choices=["custom", "vit-small"],
+        help=(
+            "Decoder preset. Use 'vit-small' for embed_dim=384, "
+            "depth=12, num_heads=6. Explicit decoder_* args are ignored "
+            "when a preset is selected."
+        ),
+    )
     parser.add_argument("--t_patch_size", default=2, type=int)
     parser.add_argument("--num_frames", default=16, type=int)
     parser.add_argument("--checkpoint_period", default=1, type=int)
@@ -175,6 +202,13 @@ def get_args_parser():
     )
     parser.set_defaults(fp32=True)
     parser.add_argument(
+        "--allow_tf32",
+        action="store_true",
+        help="Allow NVIDIA TF32 matmul/cuDNN kernels while keeping fp32 training.",
+    )
+    parser.add_argument("--no_tf32", action="store_false", dest="allow_tf32")
+    parser.set_defaults(allow_tf32=True)
+    parser.add_argument(
         "--jitter_scales_relative",
         default=[0.5, 1.0],
         type=float,
@@ -199,11 +233,92 @@ def get_args_parser():
     )
     parser.add_argument("--cls_embed", action="store_true")
     parser.set_defaults(cls_embed=True)
+
+    # Prostate 3D patch data. Kinetics remains the default to preserve
+    # compatibility with the original MAE-ST training command.
+    parser.add_argument(
+        "--data_source",
+        default="kinetics",
+        choices=["kinetics", "prostate"],
+        help="Training data source.",
+    )
+    parser.add_argument(
+        "--metadata_cache_dir",
+        default="/newdisk/individuals/renao/3DFM/Prostate/metadata_caches",
+        help="Directory containing cache_{cohort}_{suffix}.pkl files.",
+    )
+    parser.add_argument(
+        "--prostate_cohorts",
+        default=list(PROSTATE_COHORTS),
+        nargs="+",
+        help="Available prostate cohorts.",
+    )
+    parser.add_argument(
+        "--leave_one_cohort",
+        default="",
+        choices=[""] + list(PROSTATE_COHORTS),
+        help="Held-out cohort for leave-one-cohort-out pretraining.",
+    )
+    parser.add_argument(
+        "--prostate_patch_config",
+        default="p128_s0",
+        choices=list(PROSTATE_CACHE_SUFFIXES),
+        help=(
+            "Metadata cache suffix: p128_s0 for non-overlap 128 chunks, "
+            "p256_s0 for non-overlap 256 chunks sampled from overlap source, "
+            "or p256_s128 for overlap 256 chunks."
+        ),
+    )
+    parser.add_argument(
+        "--prostate_no_normalize",
+        action="store_true",
+        help="Disable 0.45/0.225 RGB normalization for prostate patches.",
+    )
+
+    parser.add_argument(
+        "--use_2d_pretrain",
+        action="store_true",
+        help="Initialize the 3D MAE encoder from the mapped 2D model checkpoint.",
+    )
+    parser.add_argument(
+        "--pretrained_2d_ckpt_dir",
+        default=DEFAULT_2D_CKPT_DIR,
+        help="Directory containing CONCH/UNI/H-optimus-1 checkpoints.",
+    )
+    parser.add_argument(
+        "--pretrained_2d_ckpt",
+        default="",
+        help="Optional explicit 2D checkpoint path. Auto mapping is used when empty.",
+    )
+    parser.add_argument(
+        "--pretrained_2d_source",
+        default="auto",
+        choices=["auto", "CONCH", "UNI", "H-optimus-1"],
+        help="2D checkpoint source label. Auto maps B/L/H to CONCH/UNI/H-optimus-1.",
+    )
     return parser
 
 
 def main(args):
     misc.init_distributed_mode(args)
+
+    if args.decoder_arch == "vit-small":
+        args.decoder_embed_dim = 384
+        args.decoder_depth = 12
+        args.decoder_num_heads = 6
+
+    if args.data_source == "prostate":
+        chunk_size = infer_chunk_size(args.prostate_patch_config)
+        uses_patch14 = args.model == "mae_vit_huge_patch14"
+        target_size = 224 if uses_patch14 else chunk_size
+        if args.input_size == 224:
+            args.input_size = target_size
+        if args.num_frames == 16:
+            args.num_frames = target_size
+        if args.t_patch_size == 2:
+            args.t_patch_size = 16
+        if args.pred_t_dim == 8:
+            args.pred_t_dim = args.num_frames
 
     print("job dir: {}".format(os.path.dirname(os.path.realpath(__file__))))
     print("{}".format(args).replace(", ", ",\n"))
@@ -216,17 +331,47 @@ def main(args):
     np.random.seed(seed)
 
     cudnn.benchmark = True
+    if args.allow_tf32:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+        print("TF32 enabled for CUDA matmul/cuDNN kernels")
 
-    dataset_train = Kinetics(
-        mode="pretrain",
-        path_to_data_dir=args.path_to_data_dir,
-        sampling_rate=args.sampling_rate,
-        num_frames=args.num_frames,
-        train_jitter_scales=(256, 320),
-        repeat_aug=args.repeat_aug,
-        jitter_aspect_relative=args.jitter_aspect_relative,
-        jitter_scales_relative=args.jitter_scales_relative,
-    )
+    if args.data_source == "prostate":
+        train_cohorts = resolve_loco_cohorts(
+            args.prostate_cohorts, args.leave_one_cohort
+        )
+        print(
+            "Prostate pretraining cohorts: {} | held out: {} | cache: {}".format(
+                train_cohorts,
+                args.leave_one_cohort or "none",
+                args.prostate_patch_config,
+            )
+        )
+        dataset_train = ProstatePatchDataset(
+            metadata_cache_dir=args.metadata_cache_dir,
+            cohorts=train_cohorts,
+            cache_suffix=args.prostate_patch_config,
+            input_size=args.input_size,
+            num_frames=args.num_frames,
+            normalize=not args.prostate_no_normalize,
+        )
+        print(
+            "Constructed prostate dataset with {} patches from {} slides".format(
+                len(dataset_train), dataset_train.num_slides
+            )
+        )
+    else:
+        dataset_train = Kinetics(
+            mode="pretrain",
+            path_to_data_dir=args.path_to_data_dir,
+            sampling_rate=args.sampling_rate,
+            num_frames=args.num_frames,
+            train_jitter_scales=(256, 320),
+            repeat_aug=args.repeat_aug,
+            jitter_aspect_relative=args.jitter_aspect_relative,
+            jitter_scales_relative=args.jitter_scales_relative,
+        )
     if args.distributed:
         num_tasks = misc.get_world_size()
         global_rank = misc.get_rank()
@@ -258,14 +403,27 @@ def main(args):
     )
 
     # define the model
+    model_kwargs = vars(args).copy()
+    model_kwargs["img_size"] = args.input_size
     model = models_mae.__dict__[args.model](
-        **vars(args),
+        **model_kwargs,
     )
 
     model.to(device)
 
     model_without_ddp = model
     print("Model = %s" % str(model_without_ddp))
+
+    if args.use_2d_pretrain and not args.resume:
+        load_2d_pretrained_weights(
+            model_without_ddp,
+            args.model,
+            ckpt_dir=args.pretrained_2d_ckpt_dir,
+            ckpt_path=args.pretrained_2d_ckpt,
+            source=args.pretrained_2d_source,
+        )
+    elif args.use_2d_pretrain and args.resume:
+        print("=> Skipping 2D pretrain initialization because --resume is set")
 
     eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
 
@@ -296,7 +454,8 @@ def main(args):
         beta = (0.9, 0.95)
     else:
         beta = args.beta
-    optimizer = torch.optim._multi_tensor.AdamW(
+    adamw_cls = getattr(getattr(torch.optim, "_multi_tensor", None), "AdamW", torch.optim.AdamW)
+    optimizer = adamw_cls(
         param_groups,
         lr=args.lr,
         betas=beta,
